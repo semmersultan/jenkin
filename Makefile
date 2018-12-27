@@ -4,3 +4,6 @@ test-lint-yaml:
 
 Jenkin:
 	docker-compose run --rm stackup Jenkins up -t app.yml -p prod.yml
+
+destroy:
+	docker-compose run --rm stackup Jenkins delete 
