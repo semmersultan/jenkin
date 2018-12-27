@@ -1,0 +1,30 @@
+---
+version: '2.0'
+services:
+  packer_build:
+    image: hashicorp/packer:full
+    volumes:
+      - "$HOME/.aws:/root/.aws"
+      - ".:/build"
+    environment:
+      - BASE_AMI_ID=${BASE_AMI_ID}
+      - APP_NAME=${APP_NAME}
+  yamllint:
+    image: boiyaa/yamllint:latest
+    volumes:
+      - ".:/workdir"
+    working_dir: /workdir
+  ami_clean:
+    image: jagregory/amicleaner
+    environment:
+      AWS_DEFAULT_REGION: ap-southeast-2
+    volumes:
+      - "$HOME/.aws:/root/.aws"
+  stackup:
+    image: realestate/stackup:latest
+    volumes:
+      - "$HOME/.aws:/root/.aws"
+      - "./cfn:/app"
+    working_dir: /app
+    environment:
+      AWS_DEFAULT_REGION: ap-southeast-2

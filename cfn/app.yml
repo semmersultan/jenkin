@@ -1,0 +1,362 @@
+---
+Description: Launches a Jenkins server.
+
+Parameters:
+  BaseAMI:
+    Description: Base AMI Image ID
+    Type: String
+
+  InstanceType:
+    Description: The EC2 instance type
+    Type: String
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+
+  VpcId:
+    Type: String
+
+  DnsPrefix:
+    Description: Prefix for Jenkins' DNS record (<prefix>.<zone>)
+    Type: String
+    Default: jenkins
+
+  DnsZone:
+    Description: Route53-hosted zone to use for the DNS record (<prefix>.<zone>)
+    Type: String
+    Default: semmer-test.internal
+
+  DockerImage:
+    Description: 'Path of the Jenkins Docker image (format: ''[<registry>[:<port>]/]<repository>:<version>'')'
+    Type: String
+    Default: aespinosa/jenkins
+
+  S3Bucket:
+    Description: Existing S3 bucket to use for Jenkins backups and restores
+    Type: String
+    Default: semmer-jenkins
+
+  S3Prefix:
+    Description: "[Optional] Key prefix to use for Jenkins backups"
+    Type: String
+    Default: ''
+
+  Subnets:
+    Description: List of VPC subnet IDs for the cluster
+    Type: List<AWS::EC2::Subnet::Id>
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+
+  AdminSecurityGroup:
+    Type: String
+    Default: ""
+
+  MemAlarmThreshhold:
+    Type: String
+    Default: '256'
+
+  EmailSNSTopic:
+    Type: String
+    Default: ""
+
+Resources:
+  ASGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      #AvailabilityZones:
+      #  Fn::GetAZs: ''
+      LaunchConfigurationName:
+        Ref: LaunchConfig
+      MinSize: '1'
+      MaxSize: '1'
+      DesiredCapacity: '1'
+      LoadBalancerNames:
+      - Ref: ElasticLoadBalancer
+      VPCZoneIdentifier:
+        Ref: Subnets
+
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /root/aws_metrics.sh:
+              content: |
+                crontab <<EOF
+                */2 * * * * /usr/local/bin/aws-scripts-mon/mon-put-instance-data.pl --aggregated --mem-avail --disk-space-avail --disk-path="/" --from-cron
+                EOF
+              mode: '000700'
+              owner: root
+              group: root
+
+    Properties:
+      IamInstanceProfile: !Ref InstanceProfile
+      ImageId: !Ref BaseAMI
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      InstanceMonitoring: true
+      SecurityGroups:
+      - Ref: ServerSecurityGroup
+      - Ref: AdminSecurityGroup
+      AssociatePublicIpAddress: 'true'
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - "#!/bin/bash -ex\n"
+            - "# Helper function\n"
+            - 'function error_exit
+
+'
+            - "{\n"
+            - '  cfn-signal -e 1 -r "$1" '''
+            - Ref: WaitHandle
+            - "'\n"
+            - "  exit 1\n"
+            - "}\n"
+            - " || error_exit 'Failed to run cfn-init'\n"
+            - "# Post-cfn work\n"
+            - "# Handle case where cron doesn't detect the new /etc/cron.d file\n"
+            - 'service cron restart
+
+'
+            - "# Attempt to restore from backup\n"
+            - 'export AWS_CONFIG_FILE=/etc/aws.conf
+
+'
+            - jenkins-restore s3://
+            - Ref: S3Bucket
+            - "/"
+            - Ref: S3Prefix
+            - " /var/lib/jenkins || true # ignore errors\n"
+            - "# Start Jenkins\n"
+            - 'docker pull '
+            - Ref: DockerImage
+            - "\n"
+            - runit-service create jenkins docker run
+            - "   -p 8080:8080"
+            - "   -v /var/lib/jenkins:/jenkins"
+            - "   "
+            - Ref: DockerImage
+            - "|| error_exit 'Failed to launch Docker container'\n"
+            - 'runit-service enable jenkins
+
+'
+            - "# All is well, signal success\n"
+            - cfn-signal -e 0 -r "Stack setup complete" '
+            - Ref: WaitHandle
+            - "'\n"
+            - "#EOF"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - !Ref InstanceRole
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /application/
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: create-log-stream
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:CreateLogGroup
+            - logs:PutLogEvents
+            Resource: "*"
+      - PolicyName: cloudwatch-metrics
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - cloudwatch:PutMetricData
+            Resource: "*"
+
+  NoHostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ActionsEnabled: false
+      AlarmDescription: Alarm if number of instances < 1 for 2 minutes in a row
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref ASGroup
+      EvaluationPeriods: 2
+      MetricName: GroupInServiceInstances
+      Namespace: AWS/AutoScaling
+      Period: 60
+      Statistic: "Sum"
+      Threshold: 1
+      TreatMissingData: notBreaching
+
+  CPUHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "CPU High alarm for ${AWS::StackName}"
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '90'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref ASGroup
+      AlarmActions:
+      - Ref: ScaleUpPolicy
+      #- !If [ UseEmailSNSTopic, !Ref EmailSNSTopic, !Ref 'AWS::NoValue' ]
+
+  CPULowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "CPU Low alarm for ${AWS::StackName}"
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '20'
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref ASGroup
+      AlarmActions:
+      - Ref: ScaleDownPolicy
+
+  MemAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Memory alarm for ${AWS::StackName}"
+      MetricName: MemoryAvailable
+      Namespace: System/Linux
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '5'
+      Threshold: !Ref MemAlarmThreshhold
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+      - Name: ImageId
+        Value: !Ref BaseAMI
+
+  DiskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Disk alarm for ${AWS::StackName}"
+      MetricName: DiskSpaceAvailable
+      Namespace: System/Linux
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '1'
+      Threshold: '10'
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+      - Name: MountPath
+        Value: "/"
+      - Name: ImageId
+        Value: !Ref BaseAMI
+      - Name: Filesystem
+        Value: "/dev/xvda1"
+
+  LbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Jenkins LBs
+      VpcId:
+        Ref: VpcId
+  ServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Jenkins servers
+      VpcId:
+        Ref: VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '8080'
+        ToPort: '8080'
+        SourceSecurityGroupId:
+          Ref: LbSecurityGroup
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref ASGroup
+      Cooldown: 180
+      ScalingAdjustment: 1
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref ASGroup
+      Cooldown: 300
+      ScalingAdjustment: -1
+
+  ElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      SecurityGroups:
+      - Ref: LbSecurityGroup
+      - Ref: AdminSecurityGroup
+      Subnets:
+        Ref: Subnets
+      Listeners:
+      - LoadBalancerPort: '80'
+        InstancePort: '8080'
+        Protocol: HTTP
+      HealthCheck:
+        Target: HTTP:8080/
+        HealthyThreshold: '3'
+        UnhealthyThreshold: '5'
+        Interval: '30'
+        Timeout: '5'
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+        - ''
+        - - Ref: DnsZone
+          - "."
+      Comment: Docker Registry
+      Name:
+        Fn::Join:
+        - ''
+        - - Ref: DnsPrefix
+          - "."
+          - Ref: DnsZone
+          - "."
+      Type: CNAME
+      TTL: '900'
+      ResourceRecords:
+      - Fn::GetAtt:
+        - ElasticLoadBalancer
+        - DNSName
+  WaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+Outputs:
+  DnsAddress:
+    Description: Jenkins URL
+    Value:
+      Fn::Join:
+      - ''
+      - - http://
+        - Ref: DnsRecord

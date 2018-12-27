@@ -1,0 +1,9 @@
+InstanceType: t2.small
+KeyPairName: ssultan
+EmailSNSTopic: arn:aws:sns:ap-southeast-2:697149014879:semmer-email
+VpcId: vpc-0ffe3fd71f25fe83d
+#ExternalZoneName: semmer-test.internal.
+SecurityGroup: sg-0a67f27f4e48fc4c0
+BaseAMI:  ami-07a3bd4944eb120a0
+Subnets: subnet-030b0c157675ea5d1
+AdminSecurityGroup: sg-0a67f27f4e48fc4c0
