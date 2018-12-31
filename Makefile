@@ -3,7 +3,7 @@ test-lint-yaml:
 	@docker-compose run --rm yamllint cfn/* .
 
 Jenkin:
-	docker-compose run --rm stackup Jenkins up -t app.yml -p prod.yml
+	docker-compose run --rm stackup app-server up -t app.yml -p prod.yml
 
 destroy:
-	docker-compose run --rm stackup Jenkins delete 
+	docker-compose run --rm stackup app-server delete

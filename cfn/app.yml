@@ -13,9 +13,6 @@ Parameters:
   KeyPairName:
     Type: AWS::EC2::KeyPair::KeyName
 
-  VpcId:
-    Type: String
-
   DnsPrefix:
     Description: Prefix for Jenkins' DNS record (<prefix>.<zone>)
     Type: String
@@ -41,10 +38,6 @@ Parameters:
     Type: String
     Default: ''
 
-  Subnets:
-    Description: List of VPC subnet IDs for the cluster
-    Type: List<AWS::EC2::Subnet::Id>
-
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup::Id
 
@@ -60,9 +53,19 @@ Parameters:
     Type: String
     Default: ""
 
+  NetworkStack:
+    Description: The name of the Network Stack
+    Type: String
+    Default: testNetwork
+
+Conditions:
+  UseNetworkStack: !Not [ !Equals [ !Ref NetworkStack, "testNetwork" ] ]
+  UseEmailSNSTopic: !Not [ !Equals [ !Ref EmailSNSTopic, "" ] ]
+
 Resources:
   ASGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
+    #Condition: UseNetworkStack
     Properties:
       #AvailabilityZones:
       #  Fn::GetAZs: ''
@@ -74,7 +77,12 @@ Resources:
       LoadBalancerNames:
       - Ref: ElasticLoadBalancer
       VPCZoneIdentifier:
-        Ref: Subnets
+      - !Select [2, !Split [",", !ImportValue 'testNetwork-PrivateSubnets']]
+
+
+          #!Sub '${NetworkStack}-PrivateSubnets'
+
+        #!Split [ ',', !GetAtt "Network.Outputs-PrivateSubnets" ]
 
   LaunchConfig:
     Type: AWS::AutoScaling::LaunchConfiguration
@@ -278,16 +286,18 @@ Resources:
 
   LbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    #Condition: UseNetworkStack
     Properties:
       GroupDescription: Jenkins LBs
       VpcId:
-        Ref: VpcId
+       Fn::ImportValue: !Sub '${NetworkStack}-VpcID'
   ServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    #Condition: UseNetworkStack
     Properties:
       GroupDescription: Jenkins servers
       VpcId:
-        Ref: VpcId
+       Fn::ImportValue: !Sub '${NetworkStack}-VpcID'
       SecurityGroupIngress:
       - IpProtocol: tcp
         FromPort: '8080'
@@ -312,12 +322,14 @@ Resources:
 
   ElasticLoadBalancer:
     Type: AWS::ElasticLoadBalancing::LoadBalancer
+    #Condition: UseNetworkStack
     Properties:
       SecurityGroups:
       - Ref: LbSecurityGroup
       - Ref: AdminSecurityGroup
       Subnets:
-        Ref: Subnets
+      - !Select [2, !Split [",", !ImportValue 'testNetwork-PrivateSubnets']]
+
       Listeners:
       - LoadBalancerPort: '80'
         InstancePort: '8080'
